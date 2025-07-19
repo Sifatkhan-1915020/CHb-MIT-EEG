@@ -1,0 +1,96 @@
+import os
+import mne
+import pyedflib
+import numpy as np
+
+# Input and output directories
+input_dir = r"chb02\extraction1"
+output_dir = r"chb02\extraction1_5_seconds_seizure"
+
+# Create the output directory if it doesn't exist
+os.makedirs(output_dir, exist_ok=True)
+
+# Function to save epochs as .edf files
+def save_edf(raw, output_file):
+    """
+    Save MNE Raw object as an EDF file using pyedflib.
+    """
+    n_channels = len(raw.ch_names)
+    sfreq = int(raw.info["sfreq"])
+    data = raw.get_data() * 1e6  # Convert data to microvolts
+    channel_info = raw.info["chs"]
+
+    # Create EDF writer
+    edf_writer = pyedflib.EdfWriter(
+        output_file,
+        n_channels=n_channels,
+        file_type=pyedflib.FILETYPE_EDF
+    )
+
+    # Define channel metadata
+    channel_labels = raw.ch_names
+    physical_min = np.min(data, axis=1)
+    physical_max = np.max(data, axis=1)
+    digital_min = -32768
+    digital_max = 32767
+    transducer = [""] * n_channels
+    prefilter = [""] * n_channels
+
+    # Set channel headers
+    edf_writer.setSignalHeaders(
+        [
+            {
+                "label": label,
+                "dimension": "uV",
+                "sample_frequnecy": sfreq,
+                "physical_min": p_min,
+                "physical_max": p_max,
+                "digital_min": digital_min,
+                "digital_max": digital_max,
+                "transducer": trans,
+                "prefilter": pre,
+            }
+            for label, p_min, p_max, trans, pre in zip(
+                channel_labels, physical_min, physical_max, transducer, prefilter
+            )
+        ]
+    )
+
+    # Write data and close file
+    edf_writer.writeSamples(data)
+    edf_writer.close()
+
+
+# Process each file in the input directory
+# Process each file in the input directory
+for filename in os.listdir(input_dir):
+    if "seizure" in filename.lower() and filename.endswith(".edf"):
+        # Load the .edf file
+        file_path = os.path.join(input_dir, filename)
+        raw = mne.io.read_raw_edf(file_path, preload=True)
+        sfreq = raw.info['sfreq']  # Sampling frequency
+        epoch_length = 5 * sfreq  # 5 seconds in samples
+        
+        # Calculate the number of complete epochs
+        num_epochs = int(raw.n_times // epoch_length)  # Convert to integer
+
+        # Extract epochs
+        for i in range(num_epochs):
+            start_sample = i * epoch_length
+            end_sample = min(start_sample + epoch_length, raw.n_times - 1)  # Ensure end_sample is within bounds
+            
+            # Extract the epoch
+            tmin = start_sample / sfreq
+            tmax = end_sample / sfreq
+            
+            # Ensure tmax does not exceed the maximum time in the data
+            if tmax > raw.times[-1]:
+                tmax = raw.times[-1]
+            
+            epoch = raw.copy().crop(tmin=tmin, tmax=tmax)
+            
+            # Save the epoch with a new filename
+            output_file = os.path.join(output_dir, f"{filename[:-4]}_epoch{i+1}.edf")
+            save_edf(epoch, output_file)
+
+print("Epoch extraction completed. Files saved in:", output_dir)
