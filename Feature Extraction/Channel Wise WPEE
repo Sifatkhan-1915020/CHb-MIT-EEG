@@ -1,0 +1,84 @@
+import os
+import numpy as np
+import pandas as pd
+import pywt
+import mne  # MNE library for handling EDF files
+
+def calculate_wavelet_packet_energy_entropy(signal, wavelet="db4", max_level=4):
+    """
+    Compute wavelet packet energy entropy (WPEE) for a given signal.
+    
+    Parameters:
+        signal (array): Input signal.
+        wavelet (str): Wavelet to use (default="db4").
+        max_level (int): Maximum decomposition level.
+        
+    Returns:
+        entropy (float): Wavelet packet energy entropy.
+    """
+    wp = pywt.WaveletPacket(data=signal, wavelet=wavelet, mode='symmetric', maxlevel=max_level)
+    nodes = wp.get_level(max_level, order="freq")  # Get nodes at the max level
+    energies = np.array([np.sum(np.square(node.data)) for node in nodes])
+    total_energy = np.sum(energies)
+    probabilities = energies / total_energy
+    entropy = -np.sum(probabilities * np.log2(probabilities + 1e-12))  # Avoid log(0)
+    return entropy
+
+def process_edf_files(input_folder, output_csv, channels):
+    """
+    Process all EDF files in a folder to compute WPEE for specified channels.
+    
+    Parameters:
+        input_folder (str): Path to the folder containing EDF files.
+        output_csv (str): Path to save the output CSV file.
+        channels (list): List of channel names to extract WPEE.
+    """
+    results = []
+
+    # Iterate through all files in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith(".edf"):
+            file_path = os.path.join(input_folder, filename)
+            print(f"Processing file: {filename}")
+            
+            # Read EDF file
+            raw = mne.io.read_raw_edf(file_path, preload=True, verbose=False)
+            data = raw.get_data()
+            channel_names = raw.info['ch_names']
+            
+            # Compute WPEE for each specified channel
+            file_results = []
+            for channel in channels:
+                if channel in channel_names:
+                    channel_index = channel_names.index(channel)
+                    signal = data[channel_index]
+                    wpee = calculate_wavelet_packet_energy_entropy(signal)
+                    file_results.append(wpee)
+                else:
+                    print(f"Channel {channel} not found in {filename}. Assigning NaN.")
+                    file_results.append(np.nan)
+            
+            results.append(file_results)
+
+    # Save results to CSV
+    column_names = [f"{channel}_WPEE" for channel in channels]
+    df = pd.DataFrame(results, columns=column_names)
+    df.to_csv(output_csv, index=False)
+    print(f"Results saved to {output_csv}")
+
+# Main script
+if __name__ == "__main__":
+    # Folder containing non-seizure EDF files
+    input_folder = "chb02/seizure"
+    
+    # Output CSV file
+    output_csv = "chb02/seizure.csv"
+    
+    # Channels to process
+    channels = [
+        "FT10-T8", "FT9-FT10", "T7-FT9", "P7-T7", "CZ-PZ",
+        "FZ-CZ", "P8-O2", "T8-P8-0", "F8-T8", "FP2-F8"
+    ]
+    
+    # Process files and calculate WPEE
+    process_edf_files(input_folder, output_csv, channels)
