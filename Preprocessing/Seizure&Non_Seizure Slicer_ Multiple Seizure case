@@ -1,0 +1,125 @@
+import os
+import pandas as pd
+import mne
+from mne.io import read_raw_edf
+import pyedflib
+import numpy as np
+
+# Paths
+base_folder = r"F:\physionet.org\files\chbmit\1.0.0\chb04"  # Path to your chb04 directory
+csv_file = os.path.join(base_folder, "summary_4.csv")  # Path to the CSV file
+extraction_folder = os.path.join(base_folder, "extraction1")  # Folder to save extracted files
+
+# Create extraction folder if it doesn't exist
+os.makedirs(extraction_folder, exist_ok=True)
+
+# Function to save EDF files
+def save_edf(raw, output_file):
+    """
+    Save MNE Raw object as an EDF file using pyedflib.
+    """
+    n_channels = len(raw.ch_names)
+    sfreq = int(raw.info["sfreq"])
+    data = raw.get_data() * 1e6  # Convert data to microvolts
+    channel_labels = raw.ch_names
+
+    # Create EDF writer
+    edf_writer = pyedflib.EdfWriter(
+        output_file,
+        n_channels=n_channels,
+        file_type=pyedflib.FILETYPE_EDF
+    )
+
+    # Set channel headers
+    edf_writer.setSignalHeaders(
+        [
+            {
+                "label": label,
+                "dimension": "uV",
+                "sample_frequency": sfreq,
+                "physical_min": np.min(data[i]),
+                "physical_max": np.max(data[i]),
+                "digital_min": -32768,
+                "digital_max": 32767,
+                "transducer": "",
+                "prefilter": "",
+            }
+            for i, label in enumerate(channel_labels)
+        ]
+    )
+
+    # Write data
+    edf_writer.writeSamples(data)
+    edf_writer.close()
+
+# Function to extract segments
+def extract_segments(file_name, start_time, end_time, output_file):
+    try:
+        # Load the EDF file
+        file_path = os.path.join(base_folder, file_name)
+        raw = read_raw_edf(file_path, preload=True)
+        sfreq = raw.info['sfreq']  # Sampling frequency
+
+        # Convert start and end times to seconds, then crop the segment
+        start_sample = int(start_time * sfreq)
+        end_sample = int(end_time * sfreq)
+        extracted = raw.copy().crop(tmin=start_sample / sfreq, tmax=end_sample / sfreq)
+
+        # Save the extracted segment
+        save_edf(extracted, os.path.join(extraction_folder, output_file))
+        print(f"Extracted and saved: {output_file}")
+    except Exception as e:
+        print(f"Error processing {file_name}: {str(e)}")
+
+# Read the CSV file
+summary_df = pd.read_csv(csv_file)
+
+# Process each row in the CSV
+for index, row in summary_df.iterrows():
+    file_name = row['File Name']
+    seizures = row['Seizures']
+
+    # Process seizure segments
+    if seizures > 0:
+        for seizure_num in range(1, seizures + 1):
+            seizure_start = row.get(f'Seizure {seizure_num} Start', None)
+            seizure_end = row.get(f'Seizure {seizure_num} End', None)
+            if pd.notna(seizure_start) and pd.notna(seizure_end):
+                # Extract seizure segment
+                seizure_file = f"{file_name.split('.')[0]}_seizure{seizure_num}.edf"
+                extract_segments(file_name, seizure_start, seizure_end, seizure_file)
+
+    # Process non-seizure segments
+    try:
+        # Load the EDF file
+        file_path = os.path.join(base_folder, file_name)
+        raw = read_raw_edf(file_path, preload=True)
+        total_duration = raw.times[-1]  # Total duration in seconds
+
+        # Initialize non-seizure start time
+        non_seizure_start = 0
+        non_segment_counter = 1
+
+        for seizure_num in range(1, seizures + 1):
+            seizure_start = row.get(f'Seizure {seizure_num} Start', None)
+            seizure_end = row.get(f'Seizure {seizure_num} End', None)
+
+            if pd.notna(seizure_start) and pd.notna(seizure_end):
+                # Extract non-seizure segment before seizure
+                if non_seizure_start < seizure_start:
+                    non_file = f"{file_name.split('.')[0]}_non{non_segment_counter}.edf"
+                    extract_segments(file_name, non_seizure_start, seizure_start, non_file)
+                    non_segment_counter += 1
+                
+                # Update non-seizure start time to after seizure
+                non_seizure_start = seizure_end
+
+        # Extract remaining non-seizure segment after last seizure
+        if non_seizure_start < total_duration:
+            non_file = f"{file_name.split('.')[0]}_non{non_segment_counter}.edf"
+            extract_segments(file_name, non_seizure_start, total_duration, non_file)
+
+    except Exception as e:
+        print(f"Error processing non-seizure segments for {file_name}: {str(e)}")
+
+print("Extraction process completed. All files saved in:", extraction_folder)
