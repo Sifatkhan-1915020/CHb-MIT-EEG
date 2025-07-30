@@ -1,0 +1,46 @@
+import os
+import mne
+import numpy as np
+
+# Input and output directories
+input_dir = r"PN00/extraction1"
+output_dir = r"PN00/extraction1_5_seconds_nonseizure"
+
+# Create the output directory if it doesn't exist
+os.makedirs(output_dir, exist_ok=True)
+
+# Process each file in the input directory
+for filename in os.listdir(input_dir):
+    if "non" in filename.lower() and filename.endswith(".edf"):
+        # Load the .edf file
+        file_path = os.path.join(input_dir, filename)
+        raw = mne.io.read_raw_edf(file_path, preload=True)
+        sfreq = raw.info['sfreq']  # Sampling frequency
+        epoch_length = 5 * sfreq  # 5 seconds in samples
+        
+        # Calculate the number of complete epochs
+        num_epochs = int(raw.n_times // epoch_length)  # Convert to integer
+        
+        # Limit to first 25 epochs per file
+        num_epochs = min(num_epochs, 25)
+
+        # Extract epochs
+        for i in range(num_epochs):
+            start_sample = i * epoch_length
+            end_sample = min(start_sample + epoch_length, raw.n_times - 1)  # Ensure end_sample is within bounds
+            
+            # Extract the epoch
+            tmin = start_sample / sfreq
+            tmax = end_sample / sfreq
+            
+            # Ensure tmax does not exceed the maximum time in the data
+            if tmax > raw.times[-1]:
+                tmax = raw.times[-1]
+            
+            epoch = raw.copy().crop(tmin=tmin, tmax=tmax)
+            
+            # Save the epoch with a new filename using MNE's built-in export
+            output_file = os.path.join(output_dir, f"{filename[:-4]}_epoch{i+1}.edf")
+            epoch.export(output_file, fmt='edf')
+
+print("Epoch extraction completed. Files saved in:", output_dir)
