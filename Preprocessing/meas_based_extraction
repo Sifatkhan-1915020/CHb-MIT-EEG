@@ -1,0 +1,189 @@
+import os
+import pandas as pd
+import mne
+from mne.io import read_raw_edf
+import numpy as np
+
+# Try to import edfio (preferred by MNE) or fall back to pyedflib
+try:
+    import edfio
+    HAS_EDFIO = True
+    print("Using edfio for EDF export")
+except ImportError:
+    try:
+        import pyedflib
+        HAS_EDFIO = False
+        print("Using pyedflib for EDF export (edfio not found)")
+    except ImportError:
+        print("WARNING: Neither edfio nor pyedflib found. EDF export may fail.")
+        HAS_EDFIO = False
+
+# Paths
+base_folder = r"F:\physionet eeg\physionet.org_Siena\files\siena-scalp-eeg\1.0.0\PN00"
+summary_file = os.path.join(base_folder, "summary_pnoo.csv")
+extraction_folder = os.path.join(base_folder, "extraction1")
+
+# Create the extraction folder if it doesn't exist
+os.makedirs(extraction_folder, exist_ok=True)
+
+# Read the summary CSV file
+summary_df = pd.read_csv(summary_file)
+
+def time_to_seconds(time_str):
+    """Convert time string (HH:MM:SS) to seconds."""
+    h, m, s = map(int, time_str.split(':'))
+    return h * 3600 + m * 60 + s
+
+def calculate_relative_time(absolute_time, recording_start_time):
+    """Calculate time relative to recording start"""
+    return time_to_seconds(absolute_time) - time_to_seconds(recording_start_time)
+
+def save_with_pyedflib(raw, output_file):
+    """
+    Save MNE Raw object as an EDF file using pyedflib when edfio is not available.
+    """
+    n_channels = len(raw.ch_names)
+    sfreq = int(raw.info["sfreq"])
+    data = raw.get_data() * 1e6  # Convert data to microvolts
+
+    # Create EDF writer
+    edf_writer = pyedflib.EdfWriter(
+        output_file,
+        n_channels=n_channels,
+        file_type=pyedflib.FILETYPE_EDF
+    )
+
+    # Define channel metadata
+    channel_labels = raw.ch_names
+    physical_min = np.min(data, axis=1)
+    physical_max = np.max(data, axis=1)
+    digital_min = -32768
+    digital_max = 32767
+    transducer = [""] * n_channels
+    prefilter = [""] * n_channels
+    dimension = ["uV"] * n_channels
+
+    # Set channel headers
+    channel_info = []
+    for i in range(n_channels):
+        ch_dict = {
+            'label': channel_labels[i], 
+            'dimension': dimension[i],
+            'sample_rate': sfreq, 
+            'physical_min': physical_min[i],
+            'physical_max': physical_max[i], 
+            'digital_min': digital_min,
+            'digital_max': digital_max, 
+            'transducer': transducer[i],
+            'prefilter': prefilter[i]
+        }
+        channel_info.append(ch_dict)
+    
+    edf_writer.setSignalHeaders(channel_info)
+    
+    # Write data and close file
+    edf_writer.writeSamples(data)
+    edf_writer.close()
+    print(f"Successfully created: {output_file} using pyedflib")
+
+# Function to extract segments
+def extract_segments(file_name, start_time, end_time, output_file):
+    try:
+        raw = read_raw_edf(os.path.join(base_folder, file_name), preload=True)
+        
+        # Ensure times are within valid range
+        max_time = raw.times[-1]
+        start_time = max(0, min(start_time, max_time))
+        end_time = max(start_time, min(end_time, max_time))
+        
+        print(f"Cropping from {start_time}s to {end_time}s (max file time: {max_time}s)")
+        
+        extracted = raw.copy().crop(tmin=start_time, tmax=end_time)
+        
+        # Save the file - try MNE's export first, fall back to pyedflib if needed
+        output_path = os.path.join(extraction_folder, output_file)
+        
+        try:
+            # Try using MNE's export function first
+            extracted.export(output_path, fmt='edf')
+            print(f"Successfully created: {output_path} using MNE export")
+        except ImportError:
+            # If MNE export fails due to missing edfio, use pyedflib
+            if not HAS_EDFIO:
+                save_with_pyedflib(extracted, output_path)
+            else:
+                raise  # Re-raise the exception if edfio should be available
+                
+    except Exception as e:
+        print(f"Error processing {file_name} for {output_file}: {e}")
+
+# Process each row in the summary CSV
+for index, row in summary_df.iterrows():
+    try:
+        file_name = row['File Name']
+        print(f"\nProcessing file {index+1}/{len(summary_df)}: {file_name}")
+        
+        # Check if the file exists
+        if not os.path.exists(os.path.join(base_folder, file_name)):
+            print(f"File not found: {os.path.join(base_folder, file_name)}")
+            continue
+        
+        # Get the recording start time and seizure times
+        recording_start = row.get('Registration Start', row.get('REG_START', None))
+        recording_end = row.get('Registration End', row.get('REG_END', None))
+        seizure_start = row.get('Seizure Start', row.get('SEIZ_START', None))
+        seizure_end = row.get('Seizure End', row.get('SEIZ_END', None))
+        
+        # Read the original file to get its duration
+        raw = read_raw_edf(os.path.join(base_folder, file_name), preload=True)
+        total_duration = raw.times[-1]  # Total duration in seconds
+        print(f"File duration: {total_duration} seconds")
+        
+        # Convert times to seconds relative to recording start
+        if all([recording_start, seizure_start, seizure_end]):
+            # Calculate relative times (seconds from the start of the recording)
+            seizure_start_time = calculate_relative_time(seizure_start, recording_start)
+            seizure_end_time = calculate_relative_time(seizure_end, recording_start)
+            
+            print(f"Recording start: {recording_start} ({time_to_seconds(recording_start)}s)")
+            print(f"Seizure start: {seizure_start} ({time_to_seconds(seizure_start)}s) -> relative: {seizure_start_time}s")
+            print(f"Seizure end: {seizure_end} ({time_to_seconds(seizure_end)}s) -> relative: {seizure_end_time}s")
+            
+            # Check if seizure times are valid
+            has_seizure = (seizure_end_time > seizure_start_time and 
+                          seizure_start_time >= 0 and 
+                          seizure_end_time <= total_duration)
+        else:
+            print(f"Missing time information for {file_name}")
+            has_seizure = False
+        
+        if has_seizure:
+            # Extract seizure segment
+            extract_segments(file_name, seizure_start_time, seizure_end_time, f"seizure_{index + 1}.edf")
+            
+            # Extract non-seizure before seizure start
+            if seizure_start_time > 0:
+                extract_segments(file_name, 0, seizure_start_time, f"non_{index + 1}_before.edf")
+            
+            # Extract non-seizure after seizure end
+            if seizure_end_time < total_duration:
+                extract_segments(file_name, seizure_end_time, total_duration, f"non_{index + 1}_after.edf")
+        else:
+            # Save the whole file as non-seizure
+            output_path = os.path.join(extraction_folder, f"non_{index + 1}.edf")
+            
+            try:
+                # Try using MNE's export function first
+                raw.export(output_path, fmt='edf')
+                print(f"Successfully created: {output_path} using MNE export")
+            except ImportError:
+                # If MNE export fails due to missing edfio, use pyedflib
+                if not HAS_EDFIO:
+                    save_with_pyedflib(raw, output_path)
+                else:
+                    raise  # Re-raise the exception if edfio should be available
+    
+    except Exception as e:
+        print(f"Error processing row {index}: {e}")
+
+print("Extraction process completed. Files saved in:", extraction_folder)
